@@ -6,6 +6,13 @@
   const DEFAULT_GLOSSARY = ["KFC", "YouTube", "Google", "Apple", "macOS", "AU"];
   const DEFAULT_SETTINGS = { enabled: true, sourceLanguage: "auto", targetLanguage: "zh" };
   const IS_YOUTUBE = location.hostname === "youtube.com" || location.hostname.endsWith(".youtube.com");
+  const CACHE_LIMIT = 800;
+  const PENDING_LIMIT = 120;
+  const TARGETS_PER_SOURCE_LIMIT = 24;
+  const INITIAL_CANDIDATE_LIMIT = 2500;
+  const ADDED_CANDIDATE_LIMIT = 120;
+  const VISIBLE_QUEUE_LIMIT = 240;
+  const STATUS_WRITE_INTERVAL = 1500;
   const CANDIDATE_SELECTOR = [
     "title", "h1", "h2", "h3", "h4", "p", "li", "label", "summary", "th", "td",
     "button", "a", "input[placeholder]", "textarea[placeholder]",
@@ -20,6 +27,7 @@
     "ytd-comments #content-text", "ytd-comment-thread-renderer #content-text",
     "ytd-comment-replies-renderer #content-text"
   ].join(",");
+  const OBSERVED_SELECTOR = `${PRIMARY_SELECTOR},${CANDIDATE_SELECTOR}`;
   const EXACT = new Map(Object.entries({
     "home": "首页", "shorts": "短视频", "subscriptions": "订阅内容", "you": "我的内容",
     "history": "观看记录", "library": "媒体库", "search": "搜索", "settings": "设置",
@@ -52,12 +60,20 @@
   let glossary = [...DEFAULT_GLOSSARY];
   let translationSettings = { ...DEFAULT_SETTINGS };
   let flushTimer = 0;
-  let scanTimer = 0;
+  let discoveryTimer = 0;
+  let visibleDrainTimer = 0;
+  let statusTimer = 0;
   let isFlushing = false;
   let appliedCount = 0;
   let lastStoredStatus = "";
+  let pendingStatusValue = "";
+  let lastStatusWriteAt = 0;
   let lastBackend = "waiting";
   let dynamicObserver = null;
+  let visibilityObserver = null;
+  let observedCandidates = new WeakSet();
+  let visibleQueued = new WeakSet();
+  const visibleQueue = [];
 
   chrome.storage.local.get({
     glossary: DEFAULT_GLOSSARY,
@@ -81,62 +97,95 @@
 
   function startTranslation() {
     markStatus("active");
+    installVisibilityObserver();
     installDynamicObserver();
-    if (!IS_YOUTUBE) preflightAddedNode(document.documentElement);
-    scheduleVisibleScan(0);
+    if (!IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
+    scheduleCandidateDiscovery(0);
     document.addEventListener("DOMContentLoaded", () => {
+      installVisibilityObserver();
       installDynamicObserver();
-      if (!IS_YOUTUBE) preflightAddedNode(document.documentElement);
-      scheduleVisibleScan(0);
+      if (!IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
+      scheduleCandidateDiscovery(0);
     }, { once: true });
-    window.addEventListener("scroll", () => scheduleVisibleScan(140), { passive: true });
-    window.addEventListener("focus", () => scheduleVisibleScan(60), { passive: true });
-    window.addEventListener("popstate", () => scheduleVisibleScan(80), { passive: true });
-    window.addEventListener("hashchange", () => scheduleVisibleScan(80), { passive: true });
-    document.addEventListener("yt-navigate-finish", () => scheduleVisibleScan(40), { passive: true });
-    document.addEventListener("pointerover", () => scheduleVisibleScan(60), { passive: true, capture: true });
-    window.setInterval(() => {
-      if (!document.hidden) scheduleVisibleScan(0);
-    }, 1500);
+    window.addEventListener("popstate", () => scheduleCandidateDiscovery(100), { passive: true });
+    window.addEventListener("hashchange", () => scheduleCandidateDiscovery(100), { passive: true });
+    document.addEventListener("yt-navigate-finish", () => {
+      resetVisibilityObserver();
+      scheduleCandidateDiscovery(120);
+    }, { passive: true });
+  }
+
+  function installVisibilityObserver() {
+    if (visibilityObserver || typeof IntersectionObserver === "undefined") return;
+    visibilityObserver = new IntersectionObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.isIntersecting) queueVisibleCandidate(entry.target);
+      }
+    }, {
+      root: null,
+      rootMargin: "160px 120px 420px 120px",
+      threshold: 0
+    });
   }
 
   function installDynamicObserver() {
     if (dynamicObserver) return;
     dynamicObserver = new MutationObserver((records) => {
-      let shouldSchedule = false;
+      let candidateBudget = IS_YOUTUBE ? 160 : 360;
       for (const record of records) {
-        if (IS_YOUTUBE) {
-          shouldSchedule = true;
+        if (record.type === "characterData") {
+          if (!wasTextAppliedByUs(record.target)) queueTextNode(record.target);
           continue;
         }
-        if (record.type === "characterData") {
-          queueTextNode(record.target);
-          shouldSchedule = true;
+        if (record.type === "attributes") {
+          queueAttribute(record.target, record.attributeName);
+          continue;
+        }
+        for (const node of record.removedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE) unregisterCandidates(node, 240);
         }
         for (const node of record.addedNodes) {
-          preflightAddedNode(node);
-          shouldSchedule = true;
+          if (node.nodeType === Node.TEXT_NODE) {
+            queueTextNode(node);
+            continue;
+          }
+          if (candidateBudget <= 0 || node.nodeType !== Node.ELEMENT_NODE) continue;
+          const discovered = discoverCandidates(node, Math.min(candidateBudget, ADDED_CANDIDATE_LIMIT));
+          candidateBudget -= discovered;
+          if (!IS_YOUTUBE && candidateBudget > 0 && isNearViewport(node)) {
+            candidateBudget -= preflightAddedNode(node, Math.min(candidateBudget, 80));
+          }
         }
-      }
-      if (shouldSchedule && !document.hidden) {
-        scheduleVisibleScan(IS_YOUTUBE ? 80 : 24);
       }
     });
     dynamicObserver.observe(document, {
       childList: true,
       characterData: true,
+      attributes: true,
+      attributeFilter: TRANSLATABLE_ATTRIBUTES,
       subtree: true
     });
   }
 
-  function preflightAddedNode(node) {
-    if (!node) return;
+  function resetVisibilityObserver() {
+    visibilityObserver?.disconnect();
+    visibilityObserver = null;
+    observedCandidates = new WeakSet();
+    visibleQueued = new WeakSet();
+    visibleQueue.length = 0;
+    if (visibleDrainTimer) window.clearTimeout(visibleDrainTimer);
+    visibleDrainTimer = 0;
+    installVisibilityObserver();
+  }
+
+  function preflightAddedNode(node, visitLimit = 120) {
+    if (!node) return 0;
     if (node.nodeType === Node.TEXT_NODE) {
       queueTextNode(node);
-      return;
+      return 1;
     }
-    if (node.nodeType !== Node.ELEMENT_NODE || shouldSkipElement(node)) return;
-    if (node !== document.documentElement && node.tagName !== "TITLE" && !isNearViewport(node)) return;
+    if (node.nodeType !== Node.ELEMENT_NODE || shouldSkipElement(node)) return 0;
+    if (node !== document.documentElement && node.tagName !== "TITLE" && !isNearViewport(node)) return 0;
 
     queueElementAttributes(node);
     let visited = 0;
@@ -148,61 +197,111 @@
           : NodeFilter.FILTER_REJECT;
       }
     });
-    while (visited < 500) {
+    while (visited < visitLimit) {
       const candidate = walker.nextNode();
       if (!candidate) break;
       if (candidate.nodeType === Node.TEXT_NODE) queueTextNode(candidate);
       else queueElementAttributes(candidate);
       visited += 1;
     }
+    return visited;
   }
 
-  function scheduleVisibleScan(delay) {
-    if (scanTimer) return;
-    scanTimer = window.setTimeout(scanVisibleCandidates, delay);
+  function scheduleCandidateDiscovery(delay) {
+    if (discoveryTimer) return;
+    discoveryTimer = window.setTimeout(() => {
+      discoveryTimer = 0;
+      if (!document.hidden) discoverCandidates(document, INITIAL_CANDIDATE_LIMIT);
+    }, delay);
   }
 
-  function scanVisibleCandidates() {
-    scanTimer = 0;
-    if (!document.documentElement || document.hidden) return;
-    const seenElements = new WeakSet();
-    const seenTextNodes = new WeakSet();
-    let visibleElements = 0;
-    let visitedTextNodes = 0;
-    scanCandidateList(document.querySelectorAll(PRIMARY_SELECTOR), 40);
-    scanCandidateList(document.querySelectorAll(CANDIDATE_SELECTOR), 100);
-
-    function scanCandidateList(candidates, elementLimit) {
-      for (const element of candidates) {
-        if (visibleElements >= elementLimit || visitedTextNodes >= 160) break;
-        if (seenElements.has(element)) continue;
-        seenElements.add(element);
-        scanCandidate(element);
+  function discoverCandidates(root, limit = ADDED_CANDIDATE_LIMIT) {
+    if (!root || document.hidden || limit <= 0) return 0;
+    let discovered = 0;
+    if (root.nodeType === Node.ELEMENT_NODE) {
+      const element = root;
+      if (element.tagName === "TITLE") scanCandidateElement(element);
+      if (element.matches?.(OBSERVED_SELECTOR)) {
+        registerCandidate(element);
+        discovered += 1;
       }
     }
-
-    function scanCandidate(element) {
-      if (shouldSkipElement(element)) return;
-      if (element.tagName !== "TITLE" && !isNearViewport(element)) return;
-      visibleElements += 1;
-      queueElementAttributes(element);
-      const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-          return node.parentElement && !shouldSkipElement(node.parentElement)
-            ? NodeFilter.FILTER_ACCEPT
-            : NodeFilter.FILTER_REJECT;
-        }
-      });
-      let localTextNodes = 0;
-      while (localTextNodes < 8 && visitedTextNodes < 160) {
-        const node = walker.nextNode();
-        if (!node) break;
-        if (seenTextNodes.has(node)) continue;
-        seenTextNodes.add(node);
-        queueTextNode(node);
-        localTextNodes += 1;
-        visitedTextNodes += 1;
+    const queryRoot = root.querySelectorAll ? root : null;
+    if (queryRoot && discovered < limit) {
+      const candidates = queryRoot.querySelectorAll(OBSERVED_SELECTOR);
+      for (const element of candidates) {
+        if (discovered >= limit) break;
+        if (element.tagName === "TITLE") scanCandidateElement(element);
+        registerCandidate(element);
+        discovered += 1;
       }
+    }
+    return discovered;
+  }
+
+  function registerCandidate(element) {
+    if (!element?.isConnected || observedCandidates.has(element) || shouldSkipElement(element)) return;
+    observedCandidates.add(element);
+    if (element.tagName === "TITLE") {
+      scanCandidateElement(element);
+      return;
+    }
+    if (visibilityObserver) visibilityObserver.observe(element);
+    else if (isNearViewport(element)) queueVisibleCandidate(element);
+  }
+
+  function unregisterCandidates(root, limit) {
+    if (!visibilityObserver || !root) return;
+    if (root.matches?.(OBSERVED_SELECTOR)) {
+      visibilityObserver.unobserve(root);
+      observedCandidates.delete(root);
+    }
+    if (!root.querySelectorAll) return;
+    let visited = 0;
+    for (const element of root.querySelectorAll(OBSERVED_SELECTOR)) {
+      visibilityObserver.unobserve(element);
+      observedCandidates.delete(element);
+      visited += 1;
+      if (visited >= limit) break;
+    }
+  }
+
+  function queueVisibleCandidate(element) {
+    if (!element?.isConnected || visibleQueued.has(element) || visibleQueue.length >= VISIBLE_QUEUE_LIMIT) return;
+    visibleQueued.add(element);
+    visibleQueue.push(element);
+    if (!visibleDrainTimer) visibleDrainTimer = window.setTimeout(drainVisibleCandidates, 16);
+  }
+
+  function drainVisibleCandidates() {
+    visibleDrainTimer = 0;
+    let budget = 32;
+    while (budget > 0 && visibleQueue.length) {
+      const element = visibleQueue.shift();
+      visibleQueued.delete(element);
+      scanCandidateElement(element);
+      budget -= 1;
+    }
+    if (visibleQueue.length) visibleDrainTimer = window.setTimeout(drainVisibleCandidates, 48);
+  }
+
+  function scanCandidateElement(element) {
+    if (!element?.isConnected || shouldSkipElement(element)) return;
+    if (element.tagName !== "TITLE" && !isNearViewport(element)) return;
+    queueElementAttributes(element);
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return node.parentElement && !shouldSkipElement(node.parentElement)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      }
+    });
+    let localTextNodes = 0;
+    while (localTextNodes < 8) {
+      const node = walker.nextNode();
+      if (!node) break;
+      queueTextNode(node);
+      localTextNodes += 1;
     }
   }
 
@@ -240,7 +339,6 @@
     }
     const element = target.type === "text" ? target.node.parentElement : target.node;
     if (element?.tagName !== "TITLE" && !isNearViewport(element)) return;
-    maskTarget(target, normalized);
 
     const exact = translationSettings.targetLanguage === "zh"
       ? EXACT.get(normalized.toLowerCase().replace(/[.!?:]+$/, ""))
@@ -250,11 +348,18 @@
       return;
     }
     const key = cacheKey(normalized);
-    if (cache.has(key)) {
-      applyTarget(target, cache.get(key));
+    const cached = getCachedTranslation(key);
+    if (cached !== undefined) {
+      if (normalize(cached) !== normalized) applyTarget(target, cached);
+      else releaseTargetMask(target);
       return;
     }
-    if (isTargetQueued(target, normalized) || pending.size >= 300) return;
+    if (isTargetQueued(target, normalized)) return;
+    const existingTargets = pending.get(normalized);
+    if ((!existingTargets && pending.size >= PENDING_LIMIT) ||
+        (existingTargets && existingTargets.length >= TARGETS_PER_SOURCE_LIMIT)) return;
+
+    maskTarget(target, normalized);
     markTargetQueued(target, normalized);
     if (!pending.has(normalized)) pending.set(normalized, []);
     pending.get(normalized).push(target);
@@ -386,12 +491,15 @@
         entries.forEach(([source, targets], index) => {
           const restored = restoreTranslation(String(translations[index] || ""), protectedItems[index].tokens);
           if (normalize(restored) === normalize(source)) {
-            cache.set(cacheKey(source), source);
+            setCachedTranslation(cacheKey(source), source);
             for (const target of targets) releaseTargetMask(target, source);
             return;
           }
-          if (!isAcceptableTranslation(restored)) return;
-          cache.set(cacheKey(source), restored);
+          if (!isAcceptableTranslation(restored)) {
+            setCachedTranslation(cacheKey(source), source);
+            return;
+          }
+          setCachedTranslation(cacheKey(source), restored);
           for (const target of targets) applyTarget(target, restored);
           appliedCount += 1;
         });
@@ -448,10 +556,14 @@
 
   function sendMessage(message) {
     return new Promise((resolve) => {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) resolve(null);
-        else resolve(response);
-      });
+      try {
+        chrome.runtime.sendMessage(message, (response) => {
+          if (chrome.runtime.lastError) resolve(null);
+          else resolve(response);
+        });
+      } catch {
+        resolve(null);
+      }
     });
   }
 
@@ -567,8 +679,28 @@
     return appliedValues.get(target.node)?.get(targetKey(target)) === value;
   }
 
+  function wasTextAppliedByUs(node) {
+    return appliedValues.get(node)?.get("text") === normalize(node?.data);
+  }
+
   function cacheKey(source) {
     return `${translationSettings.sourceLanguage}>${translationSettings.targetLanguage}:${source}`;
+  }
+
+  function getCachedTranslation(key) {
+    if (!cache.has(key)) return undefined;
+    const value = cache.get(key);
+    cache.delete(key);
+    cache.set(key, value);
+    return value;
+  }
+
+  function setCachedTranslation(key, value) {
+    if (cache.has(key)) cache.delete(key);
+    cache.set(key, value);
+    while (cache.size > CACHE_LIMIT) {
+      cache.delete(cache.keys().next().value);
+    }
   }
 
   function sanitizeGlossary(value) {
@@ -592,11 +724,34 @@
 
   function markStatus(value) {
     document.documentElement?.setAttribute("data-shaolinguo-translator", value);
-    if (value !== lastStoredStatus) {
-      lastStoredStatus = value;
-      chrome.storage.local.set({
-        contentRuntime: { state: value, page: location.hostname || "网页", pending: pending.size, at: Date.now() }
-      });
+    pendingStatusValue = value;
+    const elapsed = Date.now() - lastStatusWriteAt;
+    const urgent = !lastStoredStatus || !value.startsWith("active:");
+    if (urgent || elapsed >= STATUS_WRITE_INTERVAL) {
+      commitStatus();
+    } else if (!statusTimer) {
+      statusTimer = window.setTimeout(commitStatus, STATUS_WRITE_INTERVAL - elapsed);
+    }
+  }
+
+  function commitStatus() {
+    if (statusTimer) window.clearTimeout(statusTimer);
+    statusTimer = 0;
+    const value = pendingStatusValue;
+    if (!value || value === lastStoredStatus) return;
+    lastStoredStatus = value;
+    lastStatusWriteAt = Date.now();
+    safeStorageSet({
+      contentRuntime: { state: value, page: location.hostname || "网页", pending: pending.size, at: lastStatusWriteAt }
+    });
+  }
+
+  function safeStorageSet(value) {
+    try {
+      const request = chrome.storage.local.set(value);
+      request?.catch?.(() => {});
+    } catch {
+      // 扩展正在重新加载或关闭时，不让旧页面留下未处理错误。
     }
   }
 
