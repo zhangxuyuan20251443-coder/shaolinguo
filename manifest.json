@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "少邻国",
+  "version": "0.7.0",
+  "description": "自动识别网页语言，并在原文字位置直接转换成你选择的语言；不使用悬浮框或翻译贴片。",
+  "permissions": ["storage", "offscreen"],
+  "host_permissions": ["http://127.0.0.1:11436/*"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "少邻国：选择翻译语言",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ]
+}

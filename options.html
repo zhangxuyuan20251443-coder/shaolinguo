@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>少邻国设置</title>
+  <style>
+    body { max-width: 680px; margin: 48px auto; padding: 0 24px; font: 16px/1.6 -apple-system, BlinkMacSystemFont, sans-serif; color: #1f2328; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 240px; padding: 12px; font: 15px/1.5 ui-monospace, monospace; border: 1px solid #aaa; border-radius: 8px; }
+    button { margin: 8px 10px 8px 0; padding: 9px 18px; border: 0; border-radius: 7px; background: #1677ff; color: white; font-size: 15px; cursor: pointer; }
+    #status { margin-left: 12px; color: #16703a; }
+  </style>
+</head>
+<body>
+  <h1>少邻国：不翻译的词</h1>
+  <p id="runtime">正在读取运行状态…</p>
+  <p id="fastModel">正在检查 Chrome 快速翻译模型…</p>
+  <button id="prepareFastModel" type="button">准备当前语言的快速翻译模型</button>
+  <p>每行一个品牌名或专有词。文件名、路径、网址、电子邮箱和代码标识会自动保留，不需要写在这里。</p>
+  <textarea id="glossary" spellcheck="false"></textarea>
+  <div><button id="save">保存</button><span id="status" role="status"></span></div>
+  <script src="options.js"></script>
+</body>
+</html>
