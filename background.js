@@ -17,6 +17,7 @@ const LANGUAGE_NAMES = {
   th: "泰语"
 };
 let creatingOffscreenDocument = null;
+let lastFastStatusAt = 0;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.target === "offscreen") return false;
@@ -85,26 +86,39 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 });
 
 async function translateFastOffscreen(rawTexts, sourceLanguage, targetLanguage, languageHint) {
+  const startedAt = Date.now();
   const texts = rawTexts.slice(0, 8).map((value) => String(value).slice(0, 800));
   const source = sourceLanguage || "auto";
   const target = targetLanguage || "zh";
   if (!texts.length || source === target) return texts;
   await ensureOffscreenDocument();
-  const result = await Promise.race([
-    chrome.runtime.sendMessage({
+  let timeoutId = 0;
+  const timeout = new Promise((resolve) => {
+    timeoutId = setTimeout(() => resolve(null), 12000);
+  });
+  const request = chrome.runtime.sendMessage({
       target: "offscreen",
       type: "translate",
       texts,
       sourceLanguage: source,
       targetLanguage: target,
       languageHint: languageHint || ""
-    }),
-    new Promise((resolve) => setTimeout(() => resolve(null), 12000))
-  ]);
-  if (!result?.ok || !Array.isArray(result.translations) || result.translations.length !== texts.length) return null;
-  chrome.storage.local.set({
-    backendRuntime: { state: "ready", engine: "chrome-fast-offscreen", count: texts.length, at: Date.now() }
   });
+  const result = await Promise.race([request, timeout]).finally(() => clearTimeout(timeoutId));
+  if (!result?.ok || !Array.isArray(result.translations) || result.translations.length !== texts.length) return null;
+  const now = Date.now();
+  if (now - lastFastStatusAt >= 1500) {
+    lastFastStatusAt = now;
+    chrome.storage.local.set({
+      backendRuntime: {
+        state: "ready",
+        engine: "chrome-fast-offscreen",
+        count: texts.length,
+        elapsedMs: now - startedAt,
+        at: now
+      }
+    });
+  }
   return result.translations;
 }
 

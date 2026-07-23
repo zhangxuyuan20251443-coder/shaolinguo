@@ -9,9 +9,10 @@
   const CACHE_LIMIT = 800;
   const PENDING_LIMIT = 120;
   const TARGETS_PER_SOURCE_LIMIT = 24;
-  const INITIAL_CANDIDATE_LIMIT = 2500;
-  const ADDED_CANDIDATE_LIMIT = 120;
-  const VISIBLE_QUEUE_LIMIT = 240;
+  const INITIAL_CANDIDATE_LIMIT = IS_YOUTUBE ? 700 : 2500;
+  const ADDED_CANDIDATE_LIMIT = IS_YOUTUBE ? 40 : 120;
+  const VISIBLE_QUEUE_LIMIT = IS_YOUTUBE ? 120 : 240;
+  const TEXT_NODES_PER_CANDIDATE = IS_YOUTUBE ? 12 : 48;
   const STATUS_WRITE_INTERVAL = 1500;
   const CANDIDATE_SELECTOR = [
     "title", "h1", "h2", "h3", "h4", "p", "li", "label", "summary", "th", "td",
@@ -61,6 +62,7 @@
   let translationSettings = { ...DEFAULT_SETTINGS };
   let flushTimer = 0;
   let discoveryTimer = 0;
+  let viewportProbeTimer = 0;
   let visibleDrainTimer = 0;
   let statusTimer = 0;
   let isFlushing = false;
@@ -99,14 +101,17 @@
     markStatus("active");
     installVisibilityObserver();
     installDynamicObserver();
-    if (!IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
+    if (!visibilityObserver && !IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
     scheduleCandidateDiscovery(0);
+    scheduleViewportProbe(0);
     document.addEventListener("DOMContentLoaded", () => {
       installVisibilityObserver();
       installDynamicObserver();
-      if (!IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
+      if (!visibilityObserver && !IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
       scheduleCandidateDiscovery(0);
+      scheduleViewportProbe(0);
     }, { once: true });
+    window.addEventListener("scroll", () => scheduleViewportProbe(240), { passive: true });
     window.addEventListener("popstate", () => scheduleCandidateDiscovery(100), { passive: true });
     window.addEventListener("hashchange", () => scheduleCandidateDiscovery(100), { passive: true });
     document.addEventListener("yt-navigate-finish", () => {
@@ -131,28 +136,41 @@
   function installDynamicObserver() {
     if (dynamicObserver) return;
     dynamicObserver = new MutationObserver((records) => {
-      let candidateBudget = IS_YOUTUBE ? 160 : 360;
+      let candidateBudget = IS_YOUTUBE ? 48 : 360;
       for (const record of records) {
         if (record.type === "characterData") {
-          if (!wasTextAppliedByUs(record.target)) queueTextNode(record.target);
+          const parent = record.target.parentElement;
+          if (parent && (parent.tagName === "TITLE" || isNearViewport(parent)) && !wasTextAppliedByUs(record.target)) {
+            queueTextNode(record.target);
+          }
           continue;
         }
         if (record.type === "attributes") {
-          queueAttribute(record.target, record.attributeName);
+          if (record.target.tagName === "TITLE" || isNearViewport(record.target)) {
+            queueAttribute(record.target, record.attributeName);
+          }
           continue;
         }
         for (const node of record.removedNodes) {
-          if (node.nodeType === Node.ELEMENT_NODE) unregisterCandidates(node, 240);
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (IS_YOUTUBE) {
+            visibilityObserver?.unobserve(node);
+            observedCandidates.delete(node);
+          } else {
+            unregisterCandidates(node, 240);
+          }
         }
         for (const node of record.addedNodes) {
           if (node.nodeType === Node.TEXT_NODE) {
-            queueTextNode(node);
+            const parent = node.parentElement;
+            if (parent && (parent.tagName === "TITLE" || isNearViewport(parent))) queueTextNode(node);
             continue;
           }
           if (candidateBudget <= 0 || node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (IS_YOUTUBE && node.tagName !== "TITLE" && !isNearViewport(node)) continue;
           const discovered = discoverCandidates(node, Math.min(candidateBudget, ADDED_CANDIDATE_LIMIT));
           candidateBudget -= discovered;
-          if (!IS_YOUTUBE && candidateBudget > 0 && isNearViewport(node)) {
+          if (!visibilityObserver && !IS_YOUTUBE && candidateBudget > 0 && isNearViewport(node)) {
             candidateBudget -= preflightAddedNode(node, Math.min(candidateBudget, 80));
           }
         }
@@ -215,6 +233,36 @@
     }, delay);
   }
 
+  function scheduleViewportProbe(delay) {
+    if (viewportProbeTimer) return;
+    viewportProbeTimer = window.setTimeout(() => {
+      viewportProbeTimer = 0;
+      probeViewportCandidates();
+    }, delay);
+  }
+
+  function probeViewportCandidates() {
+    if (document.hidden || typeof document.elementsFromPoint !== "function") return;
+    const width = Math.max(1, window.innerWidth);
+    const height = Math.max(1, window.innerHeight);
+    const xPositions = [Math.min(24, width / 2), width / 2, Math.max(width - 24, width / 2)];
+    const seen = new WeakSet();
+    for (let y = 72; y < height; y += 160) {
+      for (const x of xPositions) {
+        const stack = document.elementsFromPoint(x, y).slice(0, 6);
+        for (const element of stack) {
+          const candidate = element.matches?.(OBSERVED_SELECTOR)
+            ? element
+            : element.closest?.(OBSERVED_SELECTOR);
+          if (!candidate || seen.has(candidate)) continue;
+          seen.add(candidate);
+          registerCandidate(candidate);
+          queueVisibleCandidate(candidate);
+        }
+      }
+    }
+  }
+
   function discoverCandidates(root, limit = ADDED_CANDIDATE_LIMIT) {
     if (!root || document.hidden || limit <= 0) return 0;
     let discovered = 0;
@@ -269,20 +317,21 @@
   function queueVisibleCandidate(element) {
     if (!element?.isConnected || visibleQueued.has(element) || visibleQueue.length >= VISIBLE_QUEUE_LIMIT) return;
     visibleQueued.add(element);
-    visibleQueue.push(element);
+    if (element.matches?.(PRIMARY_SELECTOR)) visibleQueue.unshift(element);
+    else visibleQueue.push(element);
     if (!visibleDrainTimer) visibleDrainTimer = window.setTimeout(drainVisibleCandidates, 16);
   }
 
   function drainVisibleCandidates() {
     visibleDrainTimer = 0;
-    let budget = 32;
+    let budget = 16;
     while (budget > 0 && visibleQueue.length) {
       const element = visibleQueue.shift();
       visibleQueued.delete(element);
       scanCandidateElement(element);
       budget -= 1;
     }
-    if (visibleQueue.length) visibleDrainTimer = window.setTimeout(drainVisibleCandidates, 48);
+    if (visibleQueue.length) visibleDrainTimer = window.setTimeout(drainVisibleCandidates, 32);
   }
 
   function scanCandidateElement(element) {
@@ -297,7 +346,7 @@
       }
     });
     let localTextNodes = 0;
-    while (localTextNodes < 8) {
+    while (localTextNodes < TEXT_NODES_PER_CANDIDATE) {
       const node = walker.nextNode();
       if (!node) break;
       queueTextNode(node);
@@ -475,16 +524,10 @@
       let translations = await tryChromeTranslator(protectedItems.map((item) => item.value));
 
       if (!translations) {
-        lastBackend = "local-model";
-        const response = await sendMessage({
-          type: "translate",
-          texts: protectedItems.map((item) => item.value),
-          context: `${location.hostname || "网页"} / ${document.title || "页面"}`,
-          sourceLanguage: translationSettings.sourceLanguage,
-          targetLanguage: translationSettings.targetLanguage
-        });
-        if (response?.ok && Array.isArray(response.translations)) translations = response.translations;
-        else markStatus(`backend-error:${String(response?.error || "no-response").slice(0, 120)}`);
+        // 网页浏览不能因为一条异常长文本而自动唤醒 4B 大模型。
+        // Chrome 快速翻译失败时，本批次原样放行；后续新内容仍可继续使用快速通道。
+        lastBackend = "chrome-fast-error";
+        translations = protectedItems.map((item) => item.value);
       }
 
       if (translations && translations.length === entries.length) {
@@ -515,6 +558,8 @@
       isFlushing = false;
       if (pending.size) {
         flushTimer = window.setTimeout(flush, lastBackend === "chrome-fast" ? 60 : 80);
+      } else {
+        scheduleViewportProbe(80);
       }
     }
   }
@@ -631,6 +676,7 @@
       else if (!result.toLowerCase().includes(original.toLowerCase())) result = `${original} ${result}`.trim();
     }
     if (translationSettings.targetLanguage === "zh") {
+      result = result.replace(/\bWikipedia\b/gi, "维基百科");
       const replacements = [
         ["拉取请求", "代码修改合并请求"], ["身份验证", "确认身份"], ["凭据", "登录信息"],
         ["存储库", "代码项目"], ["依赖项", "必需组件"], ["权限不足", "没有足够权限"],
@@ -648,7 +694,7 @@
       const chineseCount = (withoutTerms.match(/[\u3400-\u9FFF]/g) || []).length;
       if (chineseCount === 0) return false;
       const foreignCount = (withoutTerms.match(/[A-Za-z\u00C0-\u024F\u0370-\u052F\u0530-\u0E7F\u10A0-\u10FF\u3040-\u30FF\uAC00-\uD7AF]/g) || []).length;
-      return foreignCount === 0 || chineseCount >= Math.max(3, Math.ceil(foreignCount / 2));
+      return foreignCount === 0 || chineseCount >= Math.max(2, Math.ceil(foreignCount / 3));
     }
     if (target === "ja") return /[\u3040-\u30ff\u3400-\u9fff]/.test(withoutTerms);
     if (target === "ko") return /[\uac00-\ud7af]/.test(withoutTerms);
