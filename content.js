@@ -19,6 +19,11 @@
   const GENERIC_TEXT_MAX_LENGTH = 1600;
   const STATUS_WRITE_INTERVAL = 1500;
   const SEARCH_SNIPPET_SELECTOR = ".VwiC3b, .IsZvec, .aCOpRe, .hgKElc, .yXK7lf, [data-sncf]";
+  const YOUTUBE_COMMENT_SELECTOR = [
+    "ytd-comment-view-model #content-text",
+    "ytd-comment-thread-renderer #content-text",
+    "ytd-comment-replies-renderer #content-text"
+  ].join(",");
   const CANDIDATE_SELECTOR = [
     "title", "h1", "h2", "h3", "h4", "p", "li", "label", "summary", "th", "td",
     "button", "a", "input[placeholder]", "textarea[placeholder]",
@@ -190,6 +195,7 @@
     dynamicObserver = new MutationObserver((records) => {
       let candidateBudget = IS_YOUTUBE ? 48 : 360;
       let needsViewportProbe = false;
+      let needsYoutubeCommentProbe = false;
       for (const record of records) {
         if (record.type === "characterData") {
           const parent = record.target.parentElement;
@@ -220,6 +226,12 @@
             continue;
           }
           if (candidateBudget <= 0 || node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (IS_YOUTUBE &&
+              (node.matches?.(YOUTUBE_COMMENT_SELECTOR) ||
+               node.matches?.("ytd-comment-thread-renderer, ytd-comment-view-model, ytd-comment-replies-renderer") ||
+               node.querySelector?.(YOUTUBE_COMMENT_SELECTOR))) {
+            needsYoutubeCommentProbe = true;
+          }
           if (IS_YOUTUBE && node.tagName !== "TITLE" && !isNearViewport(node)) continue;
           if (!IS_YOUTUBE && isNearViewport(node)) needsViewportProbe = true;
           const discovered = discoverCandidates(node, Math.min(candidateBudget, ADDED_CANDIDATE_LIMIT));
@@ -230,6 +242,7 @@
         }
       }
       if (needsViewportProbe) scheduleViewportProbe(140);
+      if (needsYoutubeCommentProbe) scheduleViewportProbe(80);
     });
     dynamicObserver.observe(document, {
       childList: true,
@@ -304,6 +317,7 @@
       scanCandidateElement(element);
       scanned += 1;
     }
+    if (IS_YOUTUBE) scanVisibleYoutubeComments(32);
   }
 
   function scheduleViewportProbe(delay) {
@@ -316,6 +330,7 @@
 
   function probeViewportCandidates() {
     if (document.hidden || typeof document.elementsFromPoint !== "function") return;
+    if (IS_YOUTUBE) scanVisibleYoutubeComments(32);
     const width = Math.max(1, window.innerWidth);
     const height = Math.max(1, window.innerHeight);
     const xPositions = [Math.min(24, width / 2), width / 2, Math.max(width - 24, width / 2)];
@@ -334,6 +349,17 @@
           queueVisibleCandidate(candidate);
         }
       }
+    }
+  }
+
+  function scanVisibleYoutubeComments(limit = 32) {
+    let scanned = 0;
+    for (const comment of document.querySelectorAll(YOUTUBE_COMMENT_SELECTOR)) {
+      if (scanned >= limit) break;
+      if (!isNearViewport(comment)) continue;
+      registerCandidate(comment);
+      queueVisibleCandidate(comment);
+      scanned += 1;
     }
   }
 
@@ -1033,9 +1059,8 @@
 
   function sanitizeSettings(value) {
     const settings = { ...DEFAULT_SETTINGS, ...(value || {}) };
-    const supported = new Set(["zh", "en", "fr", "es", "ja", "ko", "ru", "de"]);
     settings.sourceLanguage = "auto";
-    if (!supported.has(settings.targetLanguage) || settings.targetLanguage === "auto") settings.targetLanguage = "zh";
+    settings.targetLanguage = "zh";
     settings.enabled = true;
     return settings;
   }
