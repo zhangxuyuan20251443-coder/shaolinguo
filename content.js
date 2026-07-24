@@ -3,7 +3,10 @@
 
   const SKIP_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "CODE", "PRE", "KBD", "SAMP", "TEXTAREA", "TEMPLATE", "SVG", "MATH"]);
   const TRANSLATABLE_ATTRIBUTES = ["aria-label", "title", "placeholder"];
-  const DEFAULT_GLOSSARY = ["KFC", "YouTube", "Google", "Apple", "macOS", "AU"];
+  const DEFAULT_GLOSSARY = [
+    "KFC", "YouTube", "Google", "Apple", "macOS", "AU",
+    "GitHub", "Copilot", "Codespaces", "MCP", "Git", "Rust", "TypeScript"
+  ];
   const DEFAULT_SETTINGS = { enabled: true, sourceLanguage: "auto", targetLanguage: "zh" };
   const IS_YOUTUBE = location.hostname === "youtube.com" || location.hostname.endsWith(".youtube.com");
   const CACHE_LIMIT = 800;
@@ -20,7 +23,7 @@
     "title", "h1", "h2", "h3", "h4", "p", "li", "label", "summary", "th", "td",
     "button", "a", "input[placeholder]", "textarea[placeholder]",
     "[role='button']", "[role='tab']", "[role='menuitem']", "[role='option']",
-    "[aria-label]", "[title]", "[placeholder]", "yt-formatted-string",
+    "[aria-label]", "[title]", "[placeholder]", "relative-time", "yt-formatted-string",
     "yt-attributed-string", "ytd-comment-view-model #content-text",
     "ytd-comment-replies-renderer #content-text",
     ".VwiC3b", ".IsZvec", ".aCOpRe", ".hgKElc", ".yXK7lf", "[data-sncf]"
@@ -35,6 +38,40 @@
   const OBSERVED_SELECTOR = `${PRIMARY_SELECTOR},${CANDIDATE_SELECTOR}`;
   const EXACT = new Map(Object.entries({
     "home": "首页", "shorts": "短视频", "subscriptions": "订阅内容", "you": "我的内容",
+    "dashboard": "控制面板", "all issues": "所有任务与问题",
+    "issues": "任务与问题", "all pull requests": "所有代码合并请求",
+    "pull requests": "代码合并请求", "all repositories": "所有代码项目",
+    "repositories": "代码项目", "repository": "代码项目", "projects": "项目",
+    "discussions": "讨论", "codespaces": "Codespaces 云端开发环境",
+    "copilot": "Copilot 人工智能编程助手", "explore": "探索",
+    "marketplace": "应用市场", "mcp registry": "MCP 工具目录",
+    "top repositories": "常用代码项目", "search for repositories": "搜索代码项目",
+    "find a repository…": "查找代码项目……", "find a repository...": "查找代码项目……",
+    "global navigation menu": "全局导航菜单", "close menu": "关闭菜单",
+    "open menu": "打开菜单", "skip to content": "跳到正文",
+    "breadcrumbs": "当前位置", "homepage (g then d)": "首页（快捷键：先按 G，再按 D）",
+    "all issues (g then i)": "所有任务与问题（快捷键：先按 G，再按 I）",
+    "all pull requests (g then p)": "所有代码合并请求（快捷键：先按 G，再按 P）",
+    "search or jump to…": "搜索或跳转到……", "search or jump to...": "搜索或跳转到……",
+    "type": "输入", "to search": "进行搜索",
+    "chat with copilot": "与 Copilot 人工智能编程助手对话",
+    "open copilot…": "打开 Copilot 人工智能编程助手……",
+    "open copilot...": "打开 Copilot 人工智能编程助手……",
+    "create new...": "新建……", "open user navigation menu": "打开用户菜单",
+    "you have no unread notifications (g then n)": "你没有未读通知（快捷键：先按 G，再按 N）",
+    "account": "账户", "ask anything or type @ to add context": "输入任何问题，或输入 @ 添加参考内容",
+    "ask": "提问", "select repositories to attach to conversation": "选择要加入对话的代码项目",
+    "add files, and spaces": "添加文件和工作区", "send now (enter)": "立即发送（回车键）",
+    "chat commands": "对话快捷功能", "agent": "智能代理",
+    "create issue": "新建任务或问题", "write code": "编写代码",
+    "git": "Git 版本管理", "feed": "动态", "filter": "筛选",
+    "trending repositories": "热门代码项目", "see more": "查看更多",
+    "star": "收藏", "starred": "已收藏", "star this repository": "收藏这个代码项目",
+    "add this repository to a list": "把这个代码项目加入列表",
+    "security": "安全", "status": "服务状态", "community": "社区",
+    "docs": "帮助文档", "contact": "联系我们", "footer": "页脚",
+    "footer navigation": "页脚导航", "manage cookies": "管理 Cookie",
+    "do not share my personal information": "不要共享我的个人信息",
     "history": "观看记录", "library": "媒体库", "search": "搜索", "settings": "设置",
     "sign in": "登录", "sign out": "退出登录", "log in": "登录", "log out": "退出登录",
     "subscribe": "订阅", "subscribed": "已订阅", "like": "喜欢", "dislike": "不喜欢",
@@ -66,6 +103,7 @@
   let translationSettings = { ...DEFAULT_SETTINGS };
   let flushTimer = 0;
   let discoveryTimer = 0;
+  let settledDiscoveryTimer = 0;
   let viewportProbeTimer = 0;
   let visibleDrainTimer = 0;
   let statusTimer = 0;
@@ -77,6 +115,7 @@
   let lastBackend = "waiting";
   let dynamicObserver = null;
   let visibilityObserver = null;
+  let observedShadowRoots = new WeakSet();
   let observedCandidates = new WeakSet();
   let visibleQueued = new WeakSet();
   const visibleQueue = [];
@@ -107,20 +146,29 @@
     installDynamicObserver();
     if (!visibilityObserver && !IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
     scheduleCandidateDiscovery(0);
+    scheduleSettledDiscovery(1000);
     scheduleViewportProbe(0);
     document.addEventListener("DOMContentLoaded", () => {
       installVisibilityObserver();
       installDynamicObserver();
       if (!visibilityObserver && !IS_YOUTUBE) preflightAddedNode(document.documentElement, 500);
       scheduleCandidateDiscovery(0);
+      scheduleSettledDiscovery(1000);
       scheduleViewportProbe(0);
     }, { once: true });
     window.addEventListener("scroll", () => scheduleViewportProbe(240), { passive: true });
-    window.addEventListener("popstate", () => scheduleCandidateDiscovery(100), { passive: true });
-    window.addEventListener("hashchange", () => scheduleCandidateDiscovery(100), { passive: true });
+    window.addEventListener("popstate", () => {
+      scheduleCandidateDiscovery(100);
+      scheduleSettledDiscovery(800);
+    }, { passive: true });
+    window.addEventListener("hashchange", () => {
+      scheduleCandidateDiscovery(100);
+      scheduleSettledDiscovery(800);
+    }, { passive: true });
     document.addEventListener("yt-navigate-finish", () => {
       resetVisibilityObserver();
       scheduleCandidateDiscovery(120);
+      scheduleSettledDiscovery(900);
     }, { passive: true });
   }
 
@@ -240,6 +288,24 @@
     }, delay);
   }
 
+  function scheduleSettledDiscovery(delay) {
+    if (settledDiscoveryTimer) window.clearTimeout(settledDiscoveryTimer);
+    settledDiscoveryTimer = window.setTimeout(() => {
+      settledDiscoveryTimer = 0;
+      if (!document.hidden) scanSettledCandidates(INITIAL_CANDIDATE_LIMIT);
+    }, delay);
+  }
+
+  function scanSettledCandidates(limit) {
+    let scanned = 0;
+    for (const element of document.querySelectorAll(OBSERVED_SELECTOR)) {
+      if (scanned >= limit) break;
+      if (element.tagName !== "TITLE" && !isNearViewport(element)) continue;
+      scanCandidateElement(element);
+      scanned += 1;
+    }
+  }
+
   function scheduleViewportProbe(delay) {
     if (viewportProbeTimer) return;
     viewportProbeTimer = window.setTimeout(() => {
@@ -313,7 +379,8 @@
   }
 
   function registerCandidate(element) {
-    if (!element?.isConnected || observedCandidates.has(element) || shouldSkipElement(element)) return;
+    if (!element?.isConnected || observedCandidates.has(element) ||
+        (element.tagName !== "TEXTAREA" && shouldSkipElement(element))) return;
     observedCandidates.add(element);
     if (element.tagName === "TITLE") {
       scanCandidateElement(element);
@@ -360,8 +427,14 @@
   }
 
   function scanCandidateElement(element) {
-    if (!element?.isConnected || shouldSkipElement(element)) return;
+    if (!element?.isConnected) return;
     if (element.tagName !== "TITLE" && !isNearViewport(element)) return;
+    if (element.shadowRoot) scanShadowRoot(element.shadowRoot);
+    if (element.tagName === "TEXTAREA") {
+      queueElementAttributes(element);
+      return;
+    }
+    if (shouldSkipElement(element)) return;
     if (element.matches?.(SEARCH_SNIPPET_SELECTOR)) {
       queueElementText(element);
       return;
@@ -381,6 +454,39 @@
       queueTextNode(node);
       localTextNodes += 1;
     }
+  }
+
+  function scanShadowRoot(root) {
+    if (!root) return;
+    observeShadowRoot(root);
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
+      acceptNode(candidate) {
+        const element = candidate.nodeType === Node.ELEMENT_NODE ? candidate : candidate.parentElement;
+        return element && !shouldSkipElement(element)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      }
+    });
+    let visited = 0;
+    while (visited < TEXT_NODES_PER_CANDIDATE) {
+      const candidate = walker.nextNode();
+      if (!candidate) break;
+      if (candidate.nodeType === Node.TEXT_NODE) queueTextNode(candidate);
+      else queueElementAttributes(candidate);
+      visited += 1;
+    }
+  }
+
+  function observeShadowRoot(root) {
+    if (!dynamicObserver || observedShadowRoots.has(root)) return;
+    observedShadowRoots.add(root);
+    dynamicObserver.observe(root, {
+      childList: true,
+      characterData: true,
+      attributes: true,
+      attributeFilter: TRANSLATABLE_ATTRIBUTES,
+      subtree: true
+    });
   }
 
   function shouldSkipElement(element) {
@@ -411,7 +517,10 @@
   }
 
   function queueAttribute(element, name) {
-    if (!name || shouldSkipElement(element) || !element.hasAttribute(name)) return;
+    const skipped = element?.tagName === "TEXTAREA"
+      ? element.closest?.("[translate='no'], .notranslate, [data-no-translation]")
+      : shouldSkipElement(element);
+    if (!name || skipped || !element.hasAttribute(name)) return;
     queueTarget({ type: "attribute", node: element, name, source: element.getAttribute(name) || "" });
   }
 
@@ -421,18 +530,22 @@
       releaseTargetMask(target);
       return;
     }
-    if (!shouldTranslate(normalized)) {
+    const element = target.type === "text" ? target.node.parentElement : target.node;
+    if (isGitHubIdentifierText(element, normalized)) {
       releaseTargetMask(target);
       return;
     }
-    const element = target.type === "text" ? target.node.parentElement : target.node;
     if (element?.tagName !== "TITLE" && !isNearViewport(element)) return;
 
     const exact = translationSettings.targetLanguage === "zh"
-      ? EXACT.get(normalized.toLowerCase().replace(/[.!?:]+$/, ""))
+      ? EXACT.get(normalized.toLowerCase().replace(/[.!?:]+$/, "")) || translateCommonPattern(normalized)
       : null;
     if (exact) {
       applyTarget(target, exact);
+      return;
+    }
+    if (!shouldTranslate(normalized)) {
+      releaseTargetMask(target);
       return;
     }
     const key = cacheKey(normalized);
@@ -699,6 +812,50 @@
       /^(?:[A-Za-z0-9-]+\.){2,}[A-Za-z0-9-]+$/.test(text);
   }
 
+  function translateCommonPattern(text) {
+    const relative = text.match(/^(\d+)\s+(second|minute|hour|day|week|month|year)s?\s+ago$/i);
+    if (relative) {
+      const units = {
+        second: "秒", minute: "分钟", hour: "小时", day: "天",
+        week: "周", month: "个月", year: "年"
+      };
+      return `${relative[1]}${units[relative[2].toLowerCase()]}前`;
+    }
+    return null;
+  }
+
+  function isGitHubIdentifierText(element, text) {
+    if (!element?.closest || location.hostname !== "github.com") return false;
+    const link = element.closest("a[href]");
+    if (!link) return false;
+    try {
+      const url = new URL(link.getAttribute("href") || "", location.href);
+      if (url.hostname !== "github.com") return false;
+      const parts = url.pathname.split("/").filter(Boolean).map((part) => decodeURIComponent(part));
+      if (parts.length === 2) {
+        const [owner, repository] = parts;
+        const reserved = new Set([
+          "about", "apps", "collections", "contact", "copilot", "dashboard", "discussions",
+          "enterprise", "events", "explore", "features", "issues", "marketplace", "mcp",
+          "new", "notifications", "organizations", "orgs", "pricing", "pulls", "repos",
+          "security", "settings", "site", "sponsors", "topics", "trending", "users"
+        ]);
+        if (reserved.has(owner.toLowerCase())) return false;
+        return new Set([owner, repository, `${owner}/${repository}`, `@${owner}`]).has(text);
+      }
+      if (parts.length >= 4 && (parts[2] === "blob" || parts[2] === "tree")) {
+        const identifierParts = parts.slice(3);
+        const path = identifierParts.slice(1).join("/");
+        return text === identifierParts[0] ||
+          text === identifierParts.at(-1) ||
+          (path && text === path);
+      }
+    } catch {
+      return false;
+    }
+    return false;
+  }
+
   function protect(source) {
     let value = source;
     const tokens = new Map();
@@ -729,14 +886,41 @@
       const replacements = [
         ["拉取请求", "代码修改合并请求"], ["身份验证", "确认身份"], ["凭据", "登录信息"],
         ["存储库", "代码项目"], ["依赖项", "必需组件"], ["权限不足", "没有足够权限"],
-        ["终止进程", "停止程序"], ["执行命令", "运行命令"]
+        ["终止进程", "停止程序"], ["执行命令", "运行命令"],
+        ["云代理", "云端智能代理"], ["普遍上市", "全面开放使用"],
+        ["普遍可用", "全面开放使用"], ["支持下一个 MCP 规范", "支持新版 MCP 规范"],
+        ["视图 变更日志", "查看更新记录"],
+        ["最新来自我们的 changelog", "我们的最新更新记录"],
+        ["Hive Mind", "蜂群式集体思维"], ["AI 驱动", "人工智能驱动"],
+        ["MCP 规范", "MCP 工具连接规范"],
+        ["Copilot 用于线性的云端智能代理", "适用于 Linear 的 Copilot 云端智能代理"],
+        ["GitHub Mobile：修复了失败的 Actions 检查 Copilot 云端智能代理",
+          "GitHub Mobile：使用 Copilot 云端智能代理修复未通过的 Actions 检查"],
+        ["GitHub 移动设备：修复失败的操作检查 Copilot 云端智能代理",
+          "GitHub 移动版：使用 Copilot 云端智能代理修复未通过的自动检查"],
+        ["GitHub 移动设备：修复了失败的操作检查 Copilot 云端智能代理",
+          "GitHub 移动版：使用 Copilot 云端智能代理修复未通过的自动检查"]
       ];
       for (const [from, to] of replacements) result = result.replaceAll(from, to);
+      result = result.replace(
+        /(?:最新)?(?:来自我们的|我们的)\s*change\s*log/gi,
+        "我们的最新更新记录"
+      );
+      result = result.replace(
+        /Copilot\s*(?:用于\s*)?线性(?:的)?\s*云端智能代理.*$/i,
+        "适用于 Linear 的 Copilot 云端智能代理现已全面开放使用"
+      );
+      result = result.replace(
+        /GitHub\s*(?:Mobile|移动(?:设备|版)?)\s*[:：]\s*修复.*?Copilot\s*云端智能代理/i,
+        "GitHub 移动版：使用 Copilot 云端智能代理修复未通过的自动检查"
+      );
+      result = result.replace(/\bHIVE(?:\s+Mind)?\s*思维/gi, "蜂群式集体思维");
     }
     return result;
   }
 
   function isAcceptableTranslation(text) {
+    if (/zxqkeep|[\uE000-\uF8FF]/i.test(text)) return false;
     const withoutTerms = glossary.reduce((value, term) => value.replace(new RegExp(escapeRegex(term), "gi"), ""), text);
     const target = translationSettings.targetLanguage;
     if (target === "zh") {
@@ -800,8 +984,8 @@
 
   function sanitizeGlossary(value) {
     const terms = Array.isArray(value) ? value : DEFAULT_GLOSSARY;
-    const cleaned = terms.map((item) => String(item).trim()).filter(Boolean);
-    return [...new Set(cleaned.length ? cleaned : DEFAULT_GLOSSARY)];
+    const cleaned = [...DEFAULT_GLOSSARY, ...terms].map((item) => String(item).trim()).filter(Boolean);
+    return [...new Set(cleaned)];
   }
 
   function sanitizeSettings(value) {
