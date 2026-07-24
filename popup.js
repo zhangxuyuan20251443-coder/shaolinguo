@@ -11,7 +11,7 @@ const status = document.querySelector("#status");
 const supportedTargets = new Set([...targetLanguage.options].map((option) => option.value));
 let currentTarget = DEFAULT_SETTINGS.targetLanguage;
 
-chrome.storage.local.get({ translationSettings: DEFAULT_SETTINGS }, ({ translationSettings }) => {
+chrome.storage.local.get({ translationSettings: DEFAULT_SETTINGS }, async ({ translationSettings }) => {
   const settings = { ...DEFAULT_SETTINGS, ...(translationSettings || {}) };
   targetLanguage.value = supportedTargets.has(settings.targetLanguage) ? settings.targetLanguage : "zh";
   currentTarget = targetLanguage.value;
@@ -26,6 +26,14 @@ chrome.storage.local.get({ translationSettings: DEFAULT_SETTINGS }, ({ translati
         targetLanguage: targetLanguage.value
       }
     });
+  }
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (isRestrictedChromePage(tab?.url)) {
+      status.textContent = "此页受 Chrome 限制；其他网页自动识别";
+    }
+  } catch {
+    // 无法读取标签页时保留当前目标语言提示。
   }
 });
 

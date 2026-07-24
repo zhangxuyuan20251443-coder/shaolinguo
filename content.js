@@ -677,20 +677,18 @@
       const protectedItems = entries.map(([source]) => protect(source));
       let translations = await tryChromeTranslator(protectedItems.map((item) => item.value));
 
-      if (translationSettings.targetLanguage !== "zh") {
-        const fallbackIndexes = protectedItems
-          .map((item, index) => needsLocalFallback(item.value, translations?.[index]) ? index : -1)
-          .filter((index) => index >= 0);
-        if (fallbackIndexes.length) {
-          const localTranslations = await tryLocalTranslator(
-            fallbackIndexes.map((index) => protectedItems[index].value)
-          );
-          if (localTranslations) {
-            if (!translations) translations = protectedItems.map((item) => item.value);
-            fallbackIndexes.forEach((sourceIndex, localIndex) => {
-              translations[sourceIndex] = localTranslations[localIndex];
-            });
-          }
+      const fallbackIndexes = protectedItems
+        .map((item, index) => needsLocalFallback(item.value, translations?.[index]) ? index : -1)
+        .filter((index) => index >= 0);
+      if (fallbackIndexes.length) {
+        const localTranslations = await tryLocalTranslator(
+          fallbackIndexes.map((index) => protectedItems[index].value)
+        );
+        if (localTranslations) {
+          if (!translations) translations = protectedItems.map((item) => item.value);
+          fallbackIndexes.forEach((sourceIndex, localIndex) => {
+            translations[sourceIndex] = localTranslations[localIndex];
+          });
         }
       }
 
