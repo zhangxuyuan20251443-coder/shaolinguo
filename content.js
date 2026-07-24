@@ -13,20 +13,24 @@
   const ADDED_CANDIDATE_LIMIT = IS_YOUTUBE ? 40 : 120;
   const VISIBLE_QUEUE_LIMIT = IS_YOUTUBE ? 120 : 240;
   const TEXT_NODES_PER_CANDIDATE = IS_YOUTUBE ? 12 : 48;
+  const GENERIC_TEXT_MAX_LENGTH = 1600;
   const STATUS_WRITE_INTERVAL = 1500;
+  const SEARCH_SNIPPET_SELECTOR = ".VwiC3b, .IsZvec, .aCOpRe, .hgKElc, .yXK7lf, [data-sncf]";
   const CANDIDATE_SELECTOR = [
     "title", "h1", "h2", "h3", "h4", "p", "li", "label", "summary", "th", "td",
     "button", "a", "input[placeholder]", "textarea[placeholder]",
     "[role='button']", "[role='tab']", "[role='menuitem']", "[role='option']",
     "[aria-label]", "[title]", "[placeholder]", "yt-formatted-string",
     "yt-attributed-string", "ytd-comment-view-model #content-text",
-    "ytd-comment-replies-renderer #content-text"
+    "ytd-comment-replies-renderer #content-text",
+    ".VwiC3b", ".IsZvec", ".aCOpRe", ".hgKElc", ".yXK7lf", "[data-sncf]"
   ].join(",");
   const PRIMARY_SELECTOR = [
     "#video-title", "yt-formatted-string#video-title", "[role='heading']", "h1", "h2", "h3",
     "main p", "article p", "main [aria-label]", "article [aria-label]",
     "ytd-comments #content-text", "ytd-comment-thread-renderer #content-text",
-    "ytd-comment-replies-renderer #content-text"
+    "ytd-comment-replies-renderer #content-text",
+    ".VwiC3b", ".IsZvec", ".aCOpRe", ".hgKElc", ".yXK7lf", "[data-sncf]"
   ].join(",");
   const OBSERVED_SELECTOR = `${PRIMARY_SELECTOR},${CANDIDATE_SELECTOR}`;
   const EXACT = new Map(Object.entries({
@@ -137,6 +141,7 @@
     if (dynamicObserver) return;
     dynamicObserver = new MutationObserver((records) => {
       let candidateBudget = IS_YOUTUBE ? 48 : 360;
+      let needsViewportProbe = false;
       for (const record of records) {
         if (record.type === "characterData") {
           const parent = record.target.parentElement;
@@ -168,6 +173,7 @@
           }
           if (candidateBudget <= 0 || node.nodeType !== Node.ELEMENT_NODE) continue;
           if (IS_YOUTUBE && node.tagName !== "TITLE" && !isNearViewport(node)) continue;
+          if (!IS_YOUTUBE && isNearViewport(node)) needsViewportProbe = true;
           const discovered = discoverCandidates(node, Math.min(candidateBudget, ADDED_CANDIDATE_LIMIT));
           candidateBudget -= discovered;
           if (!visibilityObserver && !IS_YOUTUBE && candidateBudget > 0 && isNearViewport(node)) {
@@ -175,6 +181,7 @@
           }
         }
       }
+      if (needsViewportProbe) scheduleViewportProbe(140);
     });
     dynamicObserver.observe(document, {
       childList: true,
@@ -251,16 +258,34 @@
       for (const x of xPositions) {
         const stack = document.elementsFromPoint(x, y).slice(0, 6);
         for (const element of stack) {
-          const candidate = element.matches?.(OBSERVED_SELECTOR)
+          let candidate = element.matches?.(OBSERVED_SELECTOR)
             ? element
             : element.closest?.(OBSERVED_SELECTOR);
+          if (!candidate && !IS_YOUTUBE) candidate = findGenericTextContainer(element);
           if (!candidate || seen.has(candidate)) continue;
           seen.add(candidate);
-          registerCandidate(candidate);
+          if (candidate.matches?.(OBSERVED_SELECTOR)) registerCandidate(candidate);
           queueVisibleCandidate(candidate);
         }
       }
     }
+  }
+
+  function findGenericTextContainer(start) {
+    let element = start;
+    for (let depth = 0; element && depth < 5; depth += 1, element = element.parentElement) {
+      if (!element.isConnected || shouldSkipElement(element)) continue;
+      if (["HTML", "BODY", "MAIN", "ARTICLE", "NAV"].includes(element.tagName)) return null;
+      if (!["DIV", "SPAN", "SECTION", "BLOCKQUOTE", "FIGCAPTION"].includes(element.tagName)) continue;
+      const rect = element.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0 || rect.height > 420 || rect.bottom < -80 || rect.top > window.innerHeight + 160) {
+        continue;
+      }
+      const text = normalize(element.textContent);
+      if (text.length < 8 || text.length > GENERIC_TEXT_MAX_LENGTH || !hasLanguageText(text)) continue;
+      return element;
+    }
+    return null;
   }
 
   function discoverCandidates(root, limit = ADDED_CANDIDATE_LIMIT) {
@@ -337,6 +362,10 @@
   function scanCandidateElement(element) {
     if (!element?.isConnected || shouldSkipElement(element)) return;
     if (element.tagName !== "TITLE" && !isNearViewport(element)) return;
+    if (element.matches?.(SEARCH_SNIPPET_SELECTOR)) {
+      queueElementText(element);
+      return;
+    }
     queueElementAttributes(element);
     const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
@@ -364,7 +393,17 @@
   function queueTextNode(node) {
     const parent = node.parentElement;
     if (!parent || shouldSkipElement(parent)) return;
+    const searchSnippet = parent.closest?.(SEARCH_SNIPPET_SELECTOR);
+    if (searchSnippet) {
+      queueElementText(searchSnippet);
+      return;
+    }
     queueTarget({ type: "text", node, source: node.data });
+  }
+
+  function queueElementText(element) {
+    if (!element?.isConnected || shouldSkipElement(element)) return;
+    queueTarget({ type: "elementText", node: element, source: element.textContent || "" });
   }
 
   function queueElementAttributes(element) {
@@ -423,11 +462,13 @@
   }
 
   function targetKey(target) {
-    return target.type === "text" ? "text" : `attribute:${target.name}`;
+    if (target.type === "text") return "text";
+    if (target.type === "elementText") return "elementText";
+    return `attribute:${target.name}`;
   }
 
   function maskTarget(target, source) {
-    if (target.type !== "text" && target.name !== "placeholder") return;
+    if (target.type !== "text" && target.type !== "elementText" && target.name !== "placeholder") return;
     const element = target.type === "text" ? target.node.parentElement : target.node;
     if (!element?.isConnected || shouldSkipElement(element)) return;
 
@@ -623,6 +664,12 @@
         rememberAppliedValue(target, translated);
         releaseTargetMask(target, source);
       }
+    } else if (target.type === "elementText") {
+      if (target.node.isConnected && normalize(target.node.textContent) === normalize(target.source)) {
+        target.node.textContent = translated;
+        rememberAppliedValue(target, translated);
+        releaseTargetMask(target, source);
+      }
     } else if (target.node.isConnected && target.node.getAttribute(target.name) === target.source) {
       target.node.setAttribute(target.name, translated);
       rememberAppliedValue(target, translated);
@@ -677,6 +724,8 @@
     }
     if (translationSettings.targetLanguage === "zh") {
       result = result.replace(/\bWikipedia\b/gi, "维基百科");
+      result = result.replace(/仅次于世界第二大人口大国\s*印度/g, "仅次于印度的世界第二人口大国");
+      result = result.replace(/世界第二人口大国人口超过/g, "世界第二人口大国，人口超过");
       const replacements = [
         ["拉取请求", "代码修改合并请求"], ["身份验证", "确认身份"], ["凭据", "登录信息"],
         ["存储库", "代码项目"], ["依赖项", "必需组件"], ["权限不足", "没有足够权限"],
@@ -758,9 +807,9 @@
   function sanitizeSettings(value) {
     const settings = { ...DEFAULT_SETTINGS, ...(value || {}) };
     const supported = new Set(["auto", "zh", "en", "ja", "ko", "es", "fr", "de", "ru", "ar", "pt", "it", "tr", "vi", "th"]);
-    if (!supported.has(settings.sourceLanguage)) settings.sourceLanguage = "auto";
+    settings.sourceLanguage = "auto";
     if (!supported.has(settings.targetLanguage) || settings.targetLanguage === "auto") settings.targetLanguage = "zh";
-    settings.enabled = settings.enabled !== false;
+    settings.enabled = true;
     return settings;
   }
 

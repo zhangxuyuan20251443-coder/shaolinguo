@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "少邻国",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "自动识别网页语言，并在原文字位置直接转换成你选择的语言；不使用悬浮框或翻译贴片。",
   "permissions": ["storage", "offscreen"],
   "host_permissions": ["http://127.0.0.1:11436/*"],
@@ -15,7 +15,7 @@
     "service_worker": "background.js"
   },
   "action": {
-    "default_title": "少邻国：选择翻译语言",
+    "default_title": "少邻国：选择翻译成什么语言",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",

@@ -6,35 +6,35 @@ const DEFAULT_SETTINGS = {
   targetLanguage: "zh"
 };
 
-const enabled = document.querySelector("#enabled");
-const sourceLanguage = document.querySelector("#sourceLanguage");
 const targetLanguage = document.querySelector("#targetLanguage");
-const apply = document.querySelector("#apply");
 const status = document.querySelector("#status");
 
 chrome.storage.local.get({ translationSettings: DEFAULT_SETTINGS }, ({ translationSettings }) => {
   const settings = { ...DEFAULT_SETTINGS, ...(translationSettings || {}) };
-  enabled.checked = settings.enabled !== false;
-  sourceLanguage.value = settings.sourceLanguage || "auto";
-  targetLanguage.value = settings.targetLanguage || "zh";
+  const supportedTargets = new Set([...targetLanguage.options].map((option) => option.value));
+  targetLanguage.value = supportedTargets.has(settings.targetLanguage) ? settings.targetLanguage : "zh";
+  if (settings.enabled === false || settings.sourceLanguage !== "auto") {
+    chrome.storage.local.set({
+      translationSettings: {
+        enabled: true,
+        sourceLanguage: "auto",
+        targetLanguage: targetLanguage.value
+      }
+    });
+  }
 });
 
-apply.addEventListener("click", async () => {
-  apply.disabled = true;
-  status.textContent = "正在应用…";
+targetLanguage.addEventListener("change", async () => {
+  targetLanguage.disabled = true;
+  status.textContent = "正在应用";
   const translationSettings = {
-    enabled: enabled.checked,
-    sourceLanguage: sourceLanguage.value,
+    enabled: true,
+    sourceLanguage: "auto",
     targetLanguage: targetLanguage.value
   };
   await chrome.storage.local.set({ translationSettings });
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (tab?.id && /^https?:/i.test(tab.url || "")) await chrome.tabs.reload(tab.id);
-  status.textContent = translationSettings.enabled ? "已应用" : "已暂停翻译";
-  window.setTimeout(() => window.close(), 450);
-});
-
-document.querySelector("#advanced").addEventListener("click", (event) => {
-  event.preventDefault();
-  chrome.runtime.openOptionsPage();
+  status.textContent = "已应用";
+  window.setTimeout(() => window.close(), 180);
 });
