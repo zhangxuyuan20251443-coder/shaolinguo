@@ -49,7 +49,9 @@ async function translate(texts, sourceLanguage, targetLanguage, languageHint) {
     translated.forEach((value, index) => {
       const item = group[index];
       output[item.index] = value;
-      setCachedTranslation(item.key, value);
+      if (String(value).replace(/\s+/g, " ").trim() !== item.text.replace(/\s+/g, " ").trim()) {
+        setCachedTranslation(item.key, value);
+      }
     });
   }
   return output;
@@ -86,6 +88,28 @@ async function translateGroup(texts, sourceLanguage, sharedSource, targetLanguag
 }
 
 async function translateSameLanguage(texts, sourceLanguage, targetLanguage) {
+  let directError = null;
+  try {
+    const direct = await translateLanguagePair(texts, sourceLanguage, targetLanguage);
+    if (isUsefulTranslationBatch(texts, direct, sourceLanguage, targetLanguage)) return direct;
+    directError = new Error(`${sourceLanguage}→${targetLanguage} 返回了原文`);
+  } catch (error) {
+    directError = error;
+  }
+
+  if (sourceLanguage !== "en" && targetLanguage !== "en") {
+    try {
+      const english = await translateLanguagePair(texts, sourceLanguage, "en");
+      const pivoted = await translateLanguagePair(english, "en", targetLanguage);
+      if (isUsefulTranslationBatch(texts, pivoted, sourceLanguage, targetLanguage)) return pivoted;
+    } catch {
+      // 中转也不可用时，把直连错误交给上层，页面会保留原文而不是错误语言。
+    }
+  }
+  throw directError || new Error(`无法翻译 ${sourceLanguage}→${targetLanguage}`);
+}
+
+async function translateLanguagePair(texts, sourceLanguage, targetLanguage) {
   const translator = await getTranslator(sourceLanguage, targetLanguage);
   if (texts.length === 1) return [await translateTextSafely(translator, texts[0])];
 
@@ -96,12 +120,25 @@ async function translateSameLanguage(texts, sourceLanguage, targetLanguage) {
     try {
       const translated = await translator.translate(combined);
       const parsed = parseSegmentedTranslation(translated, texts.length);
-      if (parsed) return parsed;
+      if (parsed) return retryUnchangedTranslations(translator, texts, parsed);
     } catch {
       // 合并文本超过设备模型的实际配额时，立即退回小并发单句翻译。
     }
   }
   return translateIndividually(translator, texts);
+}
+
+async function retryUnchangedTranslations(translator, originals, translations) {
+  const output = [...translations];
+  for (let index = 0; index < originals.length; index += 1) {
+    if (normalizedText(output[index]) !== normalizedText(originals[index])) continue;
+    try {
+      output[index] = await translateTextSafely(translator, originals[index]);
+    } catch {
+      // 单条仍不可译时保留原文，不影响同批其他已完成的译文。
+    }
+  }
+  return output;
 }
 
 async function translateIndividually(translator, texts) {
@@ -117,21 +154,58 @@ async function translateIndividually(translator, texts) {
 }
 
 async function translateTextSafely(translator, text) {
+  let directError = null;
   try {
     return await translator.translate(text);
-  } catch {
+  } catch (error) {
+    directError = error;
     const chunks = splitTranslationChunks(text, TRANSLATION_CHUNK_LIMIT);
-    if (chunks.length <= 1) return text;
+    if (chunks.length <= 1) throw directError;
     const translated = [];
     for (const chunk of chunks) {
       try {
         translated.push(await translator.translate(chunk));
-      } catch {
-        return text;
+      } catch (error) {
+        throw error || directError;
       }
     }
     return translated.join(" ");
   }
+}
+
+function isUsefulTranslationBatch(originals, translations, sourceLanguage, targetLanguage) {
+  if (!Array.isArray(translations) || translations.length !== originals.length) return false;
+  let changedCount = 0;
+  const valid = translations.every((translation, index) => {
+    const original = String(originals[index] || "").replace(/\s+/g, " ").trim();
+    const output = String(translation || "").replace(/\s+/g, " ").trim();
+    if (!output) return false;
+    if (sourceLanguage !== targetLanguage && output.toLocaleLowerCase() === original.toLocaleLowerCase()) {
+      return true;
+    }
+    changedCount += 1;
+    if (targetLanguage === "ja" && /[A-Za-z]/.test(original) && !/[\u3040-\u30ff\u3400-\u9fff]/.test(output)) {
+      return false;
+    }
+    if (targetLanguage === "ko" && /[A-Za-z\u3400-\u9fff]/.test(original) && !/[\uac00-\ud7af]/.test(output)) {
+      return false;
+    }
+    if (targetLanguage === "ru" && /[A-Za-z\u3400-\u9fff]/.test(original) && !/[\u0400-\u052f]/.test(output)) {
+      return false;
+    }
+    if (targetLanguage === "ar" && /[A-Za-z\u3400-\u9fff]/.test(original) && !/[\u0600-\u06ff]/.test(output)) {
+      return false;
+    }
+    if (targetLanguage === "th" && /[A-Za-z\u3400-\u9fff]/.test(original) && !/[\u0e00-\u0e7f]/.test(output)) {
+      return false;
+    }
+    return true;
+  });
+  return valid && changedCount > 0;
+}
+
+function normalizedText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
 
 function splitTranslationChunks(value, limit) {
