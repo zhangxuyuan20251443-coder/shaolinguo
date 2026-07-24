@@ -677,9 +677,24 @@
       const protectedItems = entries.map(([source]) => protect(source));
       let translations = await tryChromeTranslator(protectedItems.map((item) => item.value));
 
+      if (translationSettings.targetLanguage !== "zh") {
+        const fallbackIndexes = protectedItems
+          .map((item, index) => needsLocalFallback(item.value, translations?.[index]) ? index : -1)
+          .filter((index) => index >= 0);
+        if (fallbackIndexes.length) {
+          const localTranslations = await tryLocalTranslator(
+            fallbackIndexes.map((index) => protectedItems[index].value)
+          );
+          if (localTranslations) {
+            if (!translations) translations = protectedItems.map((item) => item.value);
+            fallbackIndexes.forEach((sourceIndex, localIndex) => {
+              translations[sourceIndex] = localTranslations[localIndex];
+            });
+          }
+        }
+      }
+
       if (!translations) {
-        // 网页浏览不能因为一条异常长文本而自动唤醒 4B 大模型。
-        // Chrome 快速翻译失败时，本批次原样放行；后续新内容仍可继续使用快速通道。
         lastBackend = "chrome-fast-error";
         translations = protectedItems.map((item) => item.value);
       }
@@ -751,6 +766,36 @@
     } catch {
       return null;
     }
+  }
+
+  async function tryLocalTranslator(texts) {
+    try {
+      const response = await sendMessage({
+        type: "translate",
+        texts,
+        context: document.title || location.hostname || "网页界面",
+        sourceLanguage: translationSettings.sourceLanguage,
+        targetLanguage: translationSettings.targetLanguage
+      });
+      if (!response?.ok ||
+          !Array.isArray(response.translations) ||
+          response.translations.length !== texts.length) return null;
+      lastBackend = "local-semantic";
+      return response.translations;
+    } catch {
+      return null;
+    }
+  }
+
+  function needsLocalFallback(source, translated) {
+    if (!translated || normalize(source) === normalize(translated)) return true;
+    const value = String(translated).replace(/ZXQKEEP\d+QXZ/gi, " ");
+    const target = translationSettings.targetLanguage;
+    if (target === "zh") return !/[\u3400-\u9fff]/.test(value);
+    if (target === "ja") return !/[\u3040-\u30ff\u3400-\u9fff]/.test(value);
+    if (target === "ko") return !/[\uac00-\ud7af]/.test(value);
+    if (target === "ru") return !/[\u0400-\u052f]/.test(value);
+    return !/[A-Za-z\u00c0-\u024f]/.test(value);
   }
 
   function sendMessage(message) {
@@ -990,7 +1035,7 @@
 
   function sanitizeSettings(value) {
     const settings = { ...DEFAULT_SETTINGS, ...(value || {}) };
-    const supported = new Set(["auto", "zh", "en", "ja", "ko", "es", "fr", "de", "ru", "ar", "pt", "it", "tr", "vi", "th"]);
+    const supported = new Set(["zh", "en", "fr", "es", "ja", "ko", "ru", "de"]);
     settings.sourceLanguage = "auto";
     if (!supported.has(settings.targetLanguage) || settings.targetLanguage === "auto") settings.targetLanguage = "zh";
     settings.enabled = true;

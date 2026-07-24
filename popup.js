@@ -16,7 +16,9 @@ chrome.storage.local.get({ translationSettings: DEFAULT_SETTINGS }, ({ translati
   targetLanguage.value = supportedTargets.has(settings.targetLanguage) ? settings.targetLanguage : "zh";
   currentTarget = targetLanguage.value;
   status.textContent = `当前目标：${selectedLanguageName()}`;
-  if (settings.enabled === false || settings.sourceLanguage !== "auto") {
+  if (settings.enabled === false ||
+      settings.sourceLanguage !== "auto" ||
+      settings.targetLanguage !== currentTarget) {
     chrome.storage.local.set({
       translationSettings: {
         enabled: true,
@@ -31,7 +33,6 @@ targetLanguage.addEventListener("change", async () => {
   const previousTarget = currentTarget;
   const selectedTarget = targetLanguage.value;
   const selectedName = selectedLanguageName();
-  const modelPreparation = prepareTargetModel(selectedTarget, selectedName);
   targetLanguage.disabled = true;
   targetLanguage.setAttribute("aria-busy", "true");
   status.textContent = `正在切换到${selectedName}…`;
@@ -46,18 +47,6 @@ targetLanguage.addEventListener("change", async () => {
     if (saved.translationSettings?.targetLanguage !== selectedTarget) {
       throw new Error("目标语言没有保存成功");
     }
-    await modelPreparation;
-    targetLanguage.value = selectedTarget;
-    currentTarget = selectedTarget;
-    status.textContent = `已切换到${selectedName}，正在刷新网页…`;
-    await new Promise((resolve) => window.setTimeout(resolve, 480));
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab?.id) {
-      await chrome.tabs.reload(tab.id);
-    }
-    status.textContent = `当前目标：${selectedName}`;
-    targetLanguage.disabled = false;
-    targetLanguage.removeAttribute("aria-busy");
   } catch {
     targetLanguage.value = previousTarget;
     await chrome.storage.local.set({
@@ -67,7 +56,33 @@ targetLanguage.addEventListener("change", async () => {
         targetLanguage: previousTarget
       }
     }).catch(() => {});
-    status.textContent = `无法准备${selectedName}模型，仍使用${languageNameFor(previousTarget)}`;
+    status.textContent = `无法保存设置，仍使用${languageNameFor(previousTarget)}`;
+    targetLanguage.disabled = false;
+    targetLanguage.removeAttribute("aria-busy");
+    return;
+  }
+
+  targetLanguage.value = selectedTarget;
+  currentTarget = selectedTarget;
+  prepareTargetModel(selectedTarget, selectedName).catch(() => {
+    if (currentTarget === selectedTarget) {
+      status.textContent = `${selectedName}将使用本地语义翻译`;
+    }
+  });
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (isRestrictedChromePage(tab?.url)) {
+      status.textContent = `${selectedName}已保存；Chrome 不允许扩展修改此页面`;
+    } else {
+      status.textContent = `已切换到${selectedName}，正在刷新网页…`;
+      await new Promise((resolve) => window.setTimeout(resolve, 180));
+      if (tab?.id) await chrome.tabs.reload(tab.id);
+      status.textContent = `当前目标：${selectedName}`;
+    }
+  } catch {
+    status.textContent = `当前目标：${selectedName}`;
+  } finally {
     targetLanguage.disabled = false;
     targetLanguage.removeAttribute("aria-busy");
   }
@@ -99,4 +114,10 @@ function prepareTargetModel(target, languageName) {
   } catch (error) {
     return Promise.reject(error);
   }
+}
+
+function isRestrictedChromePage(url) {
+  const value = String(url || "");
+  return /^(?:chrome|chrome-extension|edge|about):/i.test(value) ||
+    /^https:\/\/(?:chromewebstore\.google\.com|chrome\.google\.com\/webstore)\//i.test(value);
 }

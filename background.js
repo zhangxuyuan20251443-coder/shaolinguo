@@ -3,18 +3,12 @@ const MODEL = "translategemma:4b";
 const LANGUAGE_NAMES = {
   zh: "简体中文",
   en: "英语",
+  fr: "法语",
+  es: "西班牙语",
   ja: "日语",
   ko: "韩语",
-  es: "西班牙语",
-  fr: "法语",
-  de: "德语",
   ru: "俄语",
-  ar: "阿拉伯语",
-  pt: "葡萄牙语",
-  it: "意大利语",
-  tr: "土耳其语",
-  vi: "越南语",
-  th: "泰语"
+  de: "德语"
 };
 let creatingOffscreenDocument = null;
 let lastFastStatusAt = 0;

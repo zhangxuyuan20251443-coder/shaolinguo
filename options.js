@@ -1,9 +1,8 @@
 const DEFAULT_GLOSSARY = ["KFC", "YouTube", "Google", "Apple", "macOS", "AU"];
 const DEFAULT_SETTINGS = { enabled: true, sourceLanguage: "auto", targetLanguage: "zh" };
 const LANGUAGE_NAMES = {
-  zh: "中文", en: "英语", ja: "日语", ko: "韩语", es: "西班牙语", fr: "法语",
-  de: "德语", ru: "俄语", ar: "阿拉伯语", pt: "葡萄牙语", it: "意大利语",
-  tr: "土耳其语", vi: "越南语", th: "泰语"
+  zh: "中文", en: "英语", fr: "法语", es: "西班牙语",
+  ja: "日语", ko: "韩语", ru: "俄语", de: "德语"
 };
 const field = document.querySelector("#glossary");
 const status = document.querySelector("#status");
